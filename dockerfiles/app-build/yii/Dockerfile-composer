@@ -1,0 +1,37 @@
+#syntax=harbor.leops.local/library/docker/dockerfile:1
+
+# ---- 编译环境 ----
+FROM harbor.leops.local/common/tools/php:8.4 AS builder
+
+ARG APP_ENV=test \
+    APP=undefine \
+    GIT_BRANCH= \
+    GIT_COMMIT_ID=
+
+ENV APP_ENV=$APP_ENV \
+    YII_ENV=$APP_ENV \
+    APP=$APP \
+    GIT_BRANCH=$GIT_BRANCH \
+    GIT_COMMIT_ID=$GIT_COMMIT_ID
+
+COPY composer.json composer.lock .
+RUN --mount=type=cache,id=${APP}-composer,target=/app/vendor \
+    composer install \
+    --prefer-dist \
+    --no-dev \
+    --no-interaction \
+    --no-plugins \
+    --no-scripts \
+    --optimize-autoloader \
+    && cp -rf vendor /tmp/vendor
+
+# ---- 运行环境 ----
+FROM harbor.leops.local/common/runtime/yii:php-8.4 AS running
+
+ARG APP_ENV=test \
+    APP=undefine
+ENV APP_ENV=$APP_ENV \
+    APP=$APP
+
+COPY --from=builder --link --chown=www-data:www-data /tmp/vendor /app/${APP}/vendor
+COPY --chown=www-data:www-data . /app/${APP}

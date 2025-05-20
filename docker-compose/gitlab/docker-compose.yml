@@ -1,0 +1,31 @@
+services:
+  gitlab:
+    image: 'gitlab/gitlab-ce:17.11.0-ce.0'
+    container_name: gitlab
+    restart: always
+    hostname: 'git.leops.local'
+    environment:
+      TZ: 'Asia/Shanghai'
+      GITLAB_OMNIBUS_CONFIG: |
+        external_url 'http://git.leops.local'
+        gitlab_rails['time_zone'] = 'Asia/Shanghai'
+    ports:
+      - '8081:80'
+      - '2222:22'
+    volumes:
+      - ./config:/etc/gitlab
+      - ./logs:/var/log/gitlab
+      - ./data:/var/opt/gitlab
+      - /etc/localtime:/etc/localtime:ro
+    shm_size: '256m'
+  gitlab-runner:
+    image: gitlab/gitlab-runner:alpine3.19-v17.11.0
+    restart: always
+    container_name: gitlab-runner
+    environment:
+      CI_SERVER_URL: http://gitlab
+      TZ: 'Asia/Shanghai'
+    volumes:
+      - ./runner:/etc/gitlab-runner
+      - /var/run/docker.sock:/var/run/docker.sock:rw
+      - /etc/localtime:/etc/localtime:ro
