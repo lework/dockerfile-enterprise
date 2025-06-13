@@ -32,7 +32,8 @@ dockerfile-enterprise/
 │   ├── 41.实践篇-使用 Jenkins 进行 CICD.md
 │   ├── 50.进阶篇-扫描与修复 Docker 镜像漏洞.md
 │   ├── 51.进阶篇-kaniko编译镜像.md
-│   └── 52.进阶篇-使用 Kaniko 在无 Docker Daemon 环境中构建镜像.md
+│   ├── 52.进阶篇-使用 Kaniko 在无 Docker Daemon 环境中构建镜像.md
+│   └── 53.进阶篇-Kubernetes集群相关规范.md
 ├── docker-compose/                      # Docker Compose部署编排文件
 │   ├── dependency-proxies/              # 依赖代理仓库 (如 Nexus, Verdaccio) 的 docker-compose 配置
 │   │   └── docker-compose.yml
