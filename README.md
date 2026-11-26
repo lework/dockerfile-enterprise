@@ -1,5 +1,7 @@
 # Dockerfile 中小型企业实战指南
 
+![Dockerfile 中小型企业实战指南封面，涵盖镜像构建、私有仓库和 CI/CD](docs/assets/dockerfile-enterprise-cover.png)
+
 这份指南面向开发和运维团队，覆盖从编写 Dockerfile 到构建、运行和发布镜像的流程。第一次接触 Docker 时，从本页的本地示例开始。已有项目时，直接找到对应技术栈的章节。需要共享代码、镜像和依赖时，再看团队服务的部署步骤。
 
 ## 本地跑通第一个镜像
