@@ -1,0 +1,33 @@
+storage: /verdaccio/storage/data
+plugins: /verdaccio/plugins
+
+auth:
+  htpasswd:
+    file: /verdaccio/storage/htpasswd
+
+uplinks:
+  npmjs:
+    url: https://registry.npmmirror.com/
+    timeout: 30s
+
+packages:
+  '@*/*':
+    access: $all
+    publish: $authenticated
+    unpublish: $authenticated
+    proxy: npmjs
+  '**':
+    access: $all
+    publish: $authenticated
+    unpublish: $authenticated
+    proxy: npmjs
+
+max_body_size: 100mb
+log: { type: stdout, format: pretty, level: info }
+
+middlewares:
+  audit:
+    enabled: true
+
+i18n:
+  web: zh-CN

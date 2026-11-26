@@ -16,17 +16,10 @@ ENV APP_ENV=$APP_ENV \
 
 WORKDIR /app_build
 
-COPY package.json package-lock.json ./
-
+# Nuxt 的 postinstall 需要项目配置
+COPY . .
 RUN --mount=type=cache,id=${APP}-npm,target=/root/.npm \
-    --mount=type=cache,id=${APP}-node_modules,target=/app_build/node_modules \
-    npm install
-
-COPY ./ ./
-
-RUN --mount=type=cache,id=${APP}-npm,target=/root/.npm \
-    --mount=type=cache,id=${APP}-node_modules,target=/app_build/node_modules \
-    npm run build:${APP_ENV}
+    npm ci && npm run "build:${APP_ENV}"
 
 
 #
@@ -46,6 +39,7 @@ ENV APP_ENV=$APP_ENV \
 
 WORKDIR /app
 
-COPY --from=builder --link --chown=999:999 /app_build/.output /app
+COPY --from=builder --chown=nonroot:nonroot /app_build/.output/ /app/
+COPY --from=builder /app_build/ecosystem.config.js /app/ecosystem.config.cjs
 
-CMD ["bash", "-c", "exec pm2-runtime start ecosystem.config.js --json --env ${APP_ENV}"]
+CMD ["bash", "-c", "exec pm2-runtime start ecosystem.config.cjs --json --env \"${APP_ENV}\""]

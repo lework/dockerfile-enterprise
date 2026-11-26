@@ -28,7 +28,7 @@ RUN curl -s -L https://github.com/gordalina/cachetool/releases/download/7.1.0/ca
 
 COPY --from=hipages/php-fpm_exporter:2.2.0 /php-fpm_exporter /usr/local/bin/
 COPY etc /etc
-COPY scripts /scripts
+COPY --chmod=0755 scripts/entrypoint.sh /scripts/entrypoint.sh
 
 WORKDIR /app
 

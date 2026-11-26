@@ -22,9 +22,15 @@ RUN set -eux \
 
 # install node
 RUN set -eux \
-    && curl -fsSLO --compressed "http://nodejs.org/dist/v$NODE_VERSION/node-v$NODE_VERSION-linux-x64.tar.gz" \
-    && tar -zxf "node-v$NODE_VERSION-linux-x64.tar.gz" -C /usr/local --strip-components=1 --no-same-owner \
-    && rm "node-v$NODE_VERSION-linux-x64.tar.gz" \
+    && case "$(dpkg --print-architecture)" in \
+        amd64) node_arch=x64 ;; \
+        arm64) node_arch=arm64 ;; \
+        *) echo >&2 "当前架构不在本例支持范围内"; exit 1 ;; \
+    esac \
+    && node_tar="node-v$NODE_VERSION-linux-$node_arch.tar.gz" \
+    && curl -fsSLO --compressed "https://nodejs.org/dist/v$NODE_VERSION/$node_tar" \
+    && tar -zxf "$node_tar" -C /usr/local --strip-components=1 --no-same-owner \
+    && rm "$node_tar" \
     && ln -s /usr/local/bin/node /usr/local/bin/nodejs \
     # smoke test
     && node --version \
@@ -39,7 +45,7 @@ RUN set -eux \
 
 # install yarn
 RUN set -eux \
-    && curl -fsSLO -k --compressed "https://github.com/yarnpkg/yarn/releases/download/v$YARN_VERSION/yarn-v$YARN_VERSION.tar.gz" \
+    && curl -fsSLO --compressed "https://github.com/yarnpkg/yarn/releases/download/v$YARN_VERSION/yarn-v$YARN_VERSION.tar.gz" \
     && mkdir -p /opt \
     && tar -xzf yarn-v$YARN_VERSION.tar.gz -C /opt/ \
     && ln -s /opt/yarn-v$YARN_VERSION/bin/yarn /usr/local/bin/yarn \

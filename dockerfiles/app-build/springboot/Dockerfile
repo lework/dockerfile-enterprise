@@ -42,4 +42,4 @@ WORKDIR /app
 
 COPY --from=builder /app_build/target/*.jar /app/$APP.jar
 
-ENTRYPOINT ["/bin/bash", "-c", "exec java -Djava.security.egd=file:/dev/./urandom ${JAVA_OPTS} -Dfile.encoding=UTF8 -jar /app/${APP}.jar --spring.profiles.actvie=${APP_ENV} --server.port=${SERVER_PORT:-8080}"]
+ENTRYPOINT ["/bin/bash", "-c", "exec java -Djava.security.egd=file:/dev/./urandom ${JAVA_OPTS} -Dfile.encoding=UTF8 -jar /app/${APP}.jar --spring.profiles.active=${APP_ENV} --server.port=${SERVER_PORT:-8080}"]

@@ -12,8 +12,8 @@ ENV MAVEN_HOME=/usr/share/maven \
     MAVEN_CONFIG="/root/.m2"
 
 RUN set -eux; \
-    curl -fsSLO --compressed https://downloads.apache.org/maven/maven-3/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.tar.gz; \
-    mkdir -p ${MAVEN_HOME} ${MAVEN_HOME}/refi ${MAVEN_CONFIG}; \
+    curl -fsSLO --compressed https://archive.apache.org/dist/maven/maven-3/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.tar.gz; \
+    mkdir -p "${MAVEN_HOME}/ref/repository" "$MAVEN_CONFIG"; \
     tar -xzf apache-maven-${MAVEN_VERSION}-bin.tar.gz -C ${MAVEN_HOME} --strip-components=1; \
     ln -s ${MAVEN_HOME}/bin/mvn /usr/bin/mvn; \
     mvn --version; \

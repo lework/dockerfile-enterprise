@@ -2,8 +2,8 @@
 
 set -e
 
-DIR="$(cd "$(dirname "$0")" && pwd)"
-source $DIR/common.sh
+cd -- "$(dirname "${BASH_SOURCE[0]}")"
+source ./common.sh
 
 set +o noglob
 
@@ -13,10 +13,7 @@ Please do NOT set --with-chartmuseum, as chartmusuem has been deprecated and rem
 Please do NOT set --with-notary, as notary has been deprecated and removed.'
 item=0
 
-# clair is deprecated
-with_clair=$false
-# trivy is not enabled by default
-with_trivy=$false
+with_trivy=false
 
 # flag to using docker compose v1 or v2, default would using v1 docker-compose
 DOCKER_COMPOSE=docker-compose
@@ -35,14 +32,32 @@ while [ $# -gt 0 ]; do
         shift || true
 done
 
-workdir="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-cd $workdir
+if [ ! -f harbor.yml ]; then
+    error "请复制 harbor.yml.tmpl 为 harbor.yml 并配置本机的 Harbor 地址和密码" >&2
+    exit 1
+fi
+
+if grep -Eq '^[[:blank:]]*(harbor_admin_password|password):[[:blank:]]+CHANGE_ME[[:blank:]]*$' harbor.yml; then
+    error "请替换 harbor.yml 中的密码占位符 CHANGE_ME" >&2
+    exit 1
+fi
 
 h2 "[Step $item]: checking if docker is installed ..."; let item+=1
 check_docker
 
 h2 "[Step $item]: checking docker-compose is installed ..."; let item+=1
 check_dockercompose
+
+# 配置生成器会重建组件配置，已有实例先走维护流程
+if [ -f docker-compose.yml ]; then
+    existing_containers=$($DOCKER_COMPOSE ps -aq)
+else
+    existing_containers=$(docker ps -aq --filter 'name=^/harbor-core$')
+fi
+if [ -n "$existing_containers" ]; then
+    error "检测到已有 Harbor 实例。请备份数据并按第 32 章的配置变更步骤维护。" >&2
+    exit 1
+fi
 
 if [ -f harbor*.tar.gz ]
 then
@@ -58,20 +73,13 @@ then
 fi
 
 h2 "[Step $item]: preparing harbor configs ...";  let item+=1
-prepare_para=
-if [ $with_trivy ]
+prepare_args=()
+if "$with_trivy"
 then
-    prepare_para="${prepare_para} --with-trivy"
+    prepare_args+=(--with-trivy)
 fi
 
-./prepare $prepare_para
-echo ""
-
-if [ -n "$DOCKER_COMPOSE ps -q"  ]
-    then
-        note "stopping existing Harbor instance ..." 
-        $DOCKER_COMPOSE down -v
-fi
+bash ./prepare "${prepare_args[@]}"
 echo ""
 
 h2 "[Step $item]: starting Harbor ..."

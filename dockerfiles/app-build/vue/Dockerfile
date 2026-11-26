@@ -18,15 +18,10 @@ WORKDIR /app_build
 
 COPY package.json package-lock.json ./
 
-RUN --mount=type=cache,id=${APP}-npm,target=/root/.npm \
-    --mount=type=cache,id=${APP}-npm-modules,target=./node_modules \
-    npm install
+RUN --mount=type=cache,id=${APP}-npm,target=/root/.npm npm ci
 
-COPY ./ ./
-
-RUN --mount=type=cache,id=${APP}-npm,target=/root/.npm \
-    --mount=type=cache,id=${APP}-npm-modules,target=./node_modules \
-    npm run build:${APP_ENV}
+COPY . .
+RUN npm run "build:${APP_ENV}"
 
 
 #

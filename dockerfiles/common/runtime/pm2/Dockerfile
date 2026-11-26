@@ -14,9 +14,9 @@ RUN set -eux \
     && groupadd -r nonroot \
     && useradd -r -m -g nonroot nonroot \
     && mkdir -p /app/logs /home/nonroot/.pm2 \
-    && export PM2_HOME=/home/nonroot/.pm2  \
     && chown nonroot:nonroot -R /app /home/nonroot
 
 USER nonroot:nonroot
+ENV PM2_HOME=/home/nonroot/.pm2
 
 CMD [ "pm2-runtime", "start", "ecosystem.config.js" ]

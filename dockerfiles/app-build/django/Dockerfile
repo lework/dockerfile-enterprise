@@ -26,4 +26,4 @@ RUN --mount=type=cache,id=pip,target=/home/nonroot/.cache,uid=999,gid=999 \
 # 拷贝代码
 COPY --chown=nonroot:nonroot . .
 
-CMD ["bash", "-c", "python manage.py flush --no-input && python manage.py migrate && gunicorn demo.wsgi:application --bind 0.0.0.0:${SERVER_PORT:-8080}"]
+CMD ["bash", "-c", "python manage.py migrate --no-input && exec gunicorn demo.wsgi:application --bind 0.0.0.0:${SERVER_PORT:-8080}"]

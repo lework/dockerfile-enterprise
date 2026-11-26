@@ -33,5 +33,5 @@ ARG APP_ENV=test \
 ENV APP_ENV=$APP_ENV \
     APP=$APP
 
-COPY --from=builder --link --chown=www-data:www-data /tmp/vendor /app/${APP}/vendor
+COPY --from=builder --chown=www-data:www-data /tmp/vendor /app/${APP}/vendor
 COPY --chown=www-data:www-data . /app/${APP}

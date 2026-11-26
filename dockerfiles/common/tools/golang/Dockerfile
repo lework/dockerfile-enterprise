@@ -128,8 +128,13 @@ RUN set -eux; \
     apt-get install -y --no-install-recommends \
             libprotobuf-dev; \
     PROTOC_VERSION="30.2"; \
-    PROTOC_ZIP="protoc-${PROTOC_VERSION}-linux-x86_64.zip"; \
-    curl -OL "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/${PROTOC_ZIP}"; \
+    case "$(dpkg --print-architecture)" in \
+        amd64) protoc_arch=x86_64 ;; \
+        arm64) protoc_arch=aarch_64 ;; \
+        *) echo >&2 "当前架构不在本例支持范围内"; exit 1 ;; \
+    esac; \
+    PROTOC_ZIP="protoc-${PROTOC_VERSION}-linux-${protoc_arch}.zip"; \
+    curl -fsSLO "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/${PROTOC_ZIP}"; \
     unzip -o $PROTOC_ZIP -d /usr/local bin/protoc; \
     unzip -o $PROTOC_ZIP -d /usr/local 'include/*'; \
     go install honnef.co/go/tools/cmd/staticcheck@latest; \

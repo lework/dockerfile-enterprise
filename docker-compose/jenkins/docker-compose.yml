@@ -1,24 +1,19 @@
 services:
   jenkins:
-    image: jenkins/jenkins:2.504.1-lts
+    build: .
     container_name: jenkins
     user: root
-    privileged: true
     ports:
       - 8086:8080
       - 50000:50000
     volumes:
       - ./jenkins_home:/var/jenkins_home
       - /var/run/docker.sock:/var/run/docker.sock
-        #      - /usr/bin/docker:/usr/bin/docker
-        #      - /usr/libexec/docker/cli-plugins/docker-buildx:/usr/libexec/docker/cli-plugins/docker-buildx
       - /usr/share/zoneinfo/Asia/Shanghai:/etc/localtime
     environment:
       - TZ=Asia/Shanghai
       - LANG=en_US.UTF-8
-      - 'JAVA_OPTS=-Dsun.jnu.encoding=UTF-8 -Dfile.encoding=UTF-8 -Djava.awt.headless=true -Dhudson.model.DownloadService.noSignatureCheck=true -Dhudson.model.UpdateCenter.updateCenterUrl=https://cdn.jsdelivr.net/gh/lework/jenkins-update-center/updates/tencent/'
-      - JENKINS_UC=https://cdn.jsdelivr.net/gh/lework/jenkins-update-center/updates/tencent
-      - JENKINS_UC_DOWNLOAD=https://mirrors.tuna.tsinghua.edu.cn/jenkins/
+      - 'JAVA_OPTS=-Dsun.jnu.encoding=UTF-8 -Dfile.encoding=UTF-8 -Djava.awt.headless=true'
     extra_hosts:
       - 'git.leops.local=192.168.77.140'
       - 'harbor.leops.local=192.168.77.140'

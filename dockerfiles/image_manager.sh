@@ -1,914 +1,327 @@
 #!/bin/bash
-#
-# Docker Image Manager Script
-# Version: 1.0.0
-# Description: 管理 Docker 镜像依赖关系和构建的工具脚本
 
+set -o pipefail
 
-# 颜色变量
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m'
-
-# 默认的 Dockerfile 目录
-DOCKERFILE_DIR=${DOCKERFILE_DIR:-./}
-
-# 全局变量
-declare -A DOCKERFILE_FROM_CACHE
-declare -A DOCKERFILE_IMAGE_CACHE
-
-# 初始化缓存
-init_cache() {
-    while IFS= read -r dockerfile; do
-        local dir=$(dirname "$dockerfile")
-        local image_alias=$(echo "$dir" | sed "s|^${DOCKERFILE_DIR}||")
-        local build_script="$dir/build.sh"
-
-        DOCKERFILE_FROM_CACHE[$image_alias]=$(parse_from_image "$dockerfile" "$build_script" | sort)
-        DOCKERFILE_IMAGE_CACHE[$image_alias]=$(get_image_paths "$build_script" | sort)
-    done < <(find "$DOCKERFILE_DIR" -name "Dockerfile" -type f | sort)
+fail() {
+    printf '%s\n' "$*" >&2
+    exit 1
 }
 
-# 获取镜像地址列表
-get_image_paths() {
-    local build_script=$1
-    local images=()
-    
-    if [ -f "$build_script" ]; then
-        # 先尝试从脚本执行结果获取
-        local script_output
-        script_output=$(bash "$build_script" list-tags 2>/dev/null)
-        if [ $? -eq 0 ] && [ -n "$script_output" ]; then
-            while IFS= read -r line; do
-                [ -n "$line" ] && images+=("$line")
-            done <<< "$script_output"
-            printf "%s\n" "${images[@]}"
-            return
-        fi
-        
-        # 回退到解析脚本内容
-        if grep -q "^image_paths=" "$build_script"; then
-            # 提取数组声明部分
-            local array_content
-            array_content=$(awk '/^image_paths=\(/{p=1;next} /^\)/{p=0} p{print}' "$build_script" | \
-                          grep -E '".+"' | sed 's/^[[:space:]]*"//;s/"[[:space:]]*$//')
-            while IFS= read -r line; do
-                [ -n "$line" ] && images+=("$line")
-            done <<< "$array_content"
-        else
-            # 尝试读取单个镜像声明
-            while IFS= read -r line; do
-                if [[ $line =~ ^[[:space:]]*image(_path)?=\" ]]; then
-                    images+=($(echo "$line" | cut -d'=' -f2- | tr -d '"' | tr -d ' '))
-                fi
-            done < "$build_script"
-        fi
-    fi
-    printf "%s\n" "${images[@]}"
-}
+if (( BASH_VERSINFO[0] < 4 )); then
+    fail "请使用 Bash 4 或更高版本运行 image_manager.sh。"
+fi
 
-# 获取所有镜像信息
-get_images() {
-    echo -e "${GREEN}所有镜像信息:${NC}\n"
-    
-    # 计算最长别名长度
-    local max_alias_len=0
-    
-    for key in "${!DOCKERFILE_IMAGE_CACHE[@]}"; do
-        local alias_len=$(echo $key| wc -c)
-        if (( alias_len > max_alias_len )); then
-            max_alias_len=$alias_len
-        fi
+expand_args() {
+    local expression=$1
+    shift
+    local binding token name resolved=""
+    local variable='\$\{([A-Za-z_][A-Za-z_0-9]*)\}|\$([A-Za-z_][A-Za-z_0-9]*)'
+    local -A values=()
+
+    for binding; do
+        values[${binding%%=*}]=${binding#*=}
     done
-    
-    # 设置列宽 (最长别名长度 + 4个空格的边距)
-    local col_width=$((max_alias_len + 4))
-    local padding=""
-    printf -v padding "%-${col_width}s" " "
-    
-    echo -e "${YELLOW}别名$(printf "%-$((col_width-4))s" " ")镜像地址${NC}"
-    echo "$(printf '%0.s-' $(seq 1 $((col_width + 50))))"
-    
-    local last_alias=""
-    for key in "${!DOCKERFILE_IMAGE_CACHE[@]}"; do
-        read -a images <<< ${DOCKERFILE_IMAGE_CACHE[$key]}
+    while [[ $expression =~ $variable ]]; do
+        token=${BASH_REMATCH[0]}
+        name=${BASH_REMATCH[1]:-${BASH_REMATCH[2]}}
+        resolved+="${expression%%"$token"*}${values[$name]-$token}"
+        expression=${expression#*"$token"}
+    done
+    printf '%s\n' "$resolved$expression"
+}
 
-        # 显示镜像信息
-        for i in "${!images[@]}"; do
-            if [ "$key" != "$last_alias" ]; then
-                printf "%-${col_width}s %s\n" "$key" "${images[$i]}"
-                last_alias="$key"
-            else
-                printf "%s %s\n" "$padding" "${images[$i]}"
+read_build_args() {
+    local script=$1 line argument value
+    local assignment='^[[:space:]]*([A-Za-z_][A-Za-z_0-9]*)=("([^"]*)"|([^[:space:]#]+))[[:space:]]*(#.*)?$'
+    local build_arg='^[[:space:]]*--build-arg([[:space:]]+|=)("([^"]*)"|([^[:space:]]+))'
+    local -a variables=()
+
+    while IFS= read -r line || [[ -n $line ]]; do
+        if [[ $line =~ $assignment ]]; then
+            variables+=("${BASH_REMATCH[1]}=${BASH_REMATCH[3]}${BASH_REMATCH[4]}")
+        elif [[ $line =~ $build_arg ]]; then
+            argument=${BASH_REMATCH[3]}${BASH_REMATCH[4]}
+            if [[ $argument == *=* ]]; then
+                value=$(expand_args "${argument#*=}" "${variables[@]}") || return
+                printf '%s=%s\n' "${argument%%=*}" "$value"
             fi
-        done
-    done
+        fi
+    done < "$script"
 }
 
-# 获取镜像依赖关系
-get_dependencies() {
-    local image_alias=$1
-    
-    if [ -z "$image_alias" ]; then
-        echo -e "${RED}请指定镜像别名${NC}"
-        exit 1
-    fi
-    
-    # 查找对应的Dockerfile
-    dockerfile="$DOCKERFILE_DIR/$image_alias/Dockerfile"
-    if [ ! -f "$dockerfile" ]; then
-        echo -e "${RED}找不到 $dockerfile${NC}"
-        exit 1
-    fi
-    
-    echo -e "${GREEN}镜像 $image_alias 的依赖关系:${NC}\n"
-    
-    # 获取FROM依赖
-    echo -e "${YELLOW}依赖的镜像:${NC}"
-    echo "${DOCKERFILE_FROM_CACHE[$image_alias]}" | tr ' ' '\n'
-    echo
-    
-    # 显示当前镜像的标签
-    echo -e "${YELLOW}编译后的标签列表:${NC}"
+parse_froms() {
+    local file=$1 build_args=$2 line instruction="" arg name value image flag alias
+    local i before_first_from=1
+    local arg_name='^[A-Za-z_][A-Za-z_0-9]*$'
+    local -a words args=()
+    local -A overrides=() stages=()
 
-    for image in ${DOCKERFILE_IMAGE_CACHE[$image_alias]}; do
-        echo "  └─ $image"
-    done
-    echo
-    
-    # 查找被哪些镜像依赖
-    echo -e "${YELLOW}被以下镜像依赖:${NC}"
-    local dependents=()
+    while IFS='=' read -r name value; do
+        if [[ $name =~ $arg_name ]]; then
+            overrides[$name]=$value
+        fi
+    done <<< "$build_args"
 
-    for source_image in ${DOCKERFILE_IMAGE_CACHE[$image_alias]}; do
-        for key in "${!DOCKERFILE_FROM_CACHE[@]}"; do
-                for from_image in "${DOCKERFILE_FROM_CACHE[$key]}"; do
-                    if check_image_dependency "$from_image" "$source_image"; then
-                        dependents+=("$key")
+    while IFS= read -r line || [[ -n $line ]]; do
+        line=${line%$'\r'}
+        [[ $line =~ ^[[:space:]]*(#|$) ]] && continue
+        if [[ $line == *'\' ]]; then
+            instruction+=${line%\\}
+            continue
+        fi
+        read -r -a words <<< "$instruction$line"
+        instruction=""
+
+        case "${words[0]^^}" in
+            ARG)
+                (( before_first_from )) || continue
+                for arg in "${words[@]:1}"; do
+                    name=${arg%%=*}
+                    [[ $name =~ $arg_name ]] || continue
+                    if [[ ${overrides[$name]+set} ]]; then
+                        args+=("$name=${overrides[$name]}")
+                    elif [[ $arg == *=* ]]; then
+                        value=${arg#*=}
+                        value=${value#\"}
+                        value=${value%\"}
+                        value=${value#\'}
+                        value=${value%\'}
+                        value=$(expand_args "$value" "${args[@]}") || return
+                        args+=("$name=$value")
                     fi
                 done
-        done
-    done 
-    
-    # 输出去重后的依赖列表
-    printf "%s\n" "${dependents[@]}" | sort -u
+                ;;
+            FROM)
+                before_first_from=0
+                i=1
+                while [[ ${words[i]-} == --* ]]; do
+                    ((i += 1))
+                done
+                image=$(expand_args "${words[i]-}" "${args[@]}") || return
+                if [[ -z "$image" ]]; then
+                    printf '%s 中的 FROM 缺少镜像名。\n' "$file" >&2
+                    return 1
+                fi
+                if [[ ! ${stages[${image,,}]+set} ]]; then
+                    printf '%s\n' "$image"
+                fi
+                flag=${words[i+1]-}
+                alias=${words[i+2]-}
+                if [[ ${flag^^} == AS && -n $alias ]]; then
+                    stages[${alias,,}]=1
+                fi
+                ;;
+        esac
+    done < "$file"
 }
 
-# 构建依赖镜像
-build_dependents() {
-    local image_alias=$1
-    
-    if [ -z "$image_alias" ]; then
-        echo -e "${RED}请指定镜像别名${NC}"
-        exit 1
+canonical_ref() {
+    local ref=$1
+    if [[ $ref == *@* || ${ref##*/} == *:* ]]; then
+        printf '%s\n' "$ref"
+    else
+        printf '%s:latest\n' "$ref"
     fi
-    
-    # 获取所有依赖此镜像的其他镜像
-    local dependents=()
-    for source_image in ${DOCKERFILE_IMAGE_CACHE[$image_alias]}; do
-      for key in "${!DOCKERFILE_FROM_CACHE[@]}"; do
-           for from_image in "${DOCKERFILE_FROM_CACHE[$key]}"; do
-               if check_image_dependency "$from_image" "$source_image"; then
-                   dependents+=("$key")
-		   break
-               fi
-           done
-       done
+}
+
+declare -a aliases=()
+declare -A froms=() tags=() parents=() children=()
+
+load_images() {
+    local files file directory alias build_script overrides refs ref owner
+    local -A owners=()
+    files=$(find "$root" -type f \( -name Dockerfile -o -name 'Dockerfile-*' -o -name 'Dockerfile.*' \) | LC_ALL=C sort) ||
+        fail "扫描 Dockerfile 失败。目录 $root"
+    [[ -n "$files" ]] || fail "目录 $root 中没有 Dockerfile。"
+
+    while IFS= read -r file; do
+        directory=${file%/*}
+        alias=${directory#"$root"}
+        alias=${alias#/}
+        alias=${alias:-.}
+        build_script="$directory/build.sh"
+
+        if [[ ! ${tags[$alias]+set} ]]; then
+            aliases+=("$alias")
+            tags[$alias]=""
+            if [[ -f "$build_script" ]]; then
+                tags[$alias]=$(cd -- "$directory" && bash ./build.sh list-tags | LC_ALL=C sort -u) ||
+                    fail "读取 $build_script 的 list-tags 失败。"
+                [[ -n ${tags[$alias]} ]] || fail "$build_script list-tags 未返回镜像标签。"
+            fi
+        fi
+
+        overrides=""
+        if [[ $file == "$directory/Dockerfile" && -f "$build_script" ]]; then
+            overrides=$(read_build_args "$build_script") || fail "读取 $build_script 的构建参数失败。"
+        fi
+        refs=$(parse_froms "$file" "$overrides") || fail "解析 $file 失败。"
+        if [[ -n $refs ]]; then
+            froms[$alias]+="$refs"$'\n'
+        fi
+    done <<< "$files"
+
+    for alias in "${aliases[@]}"; do
+        while IFS= read -r ref; do
+            [[ -n $ref ]] || continue
+            [[ $ref != *[[:space:]]* && $ref != *'$'* ]] ||
+                fail "$alias 的 list-tags 返回无效镜像引用 $ref。"
+            ref=$(canonical_ref "$ref")
+            owner=${owners[$ref]-}
+            [[ -z $owner || $owner == "$alias" ]] ||
+                fail "镜像 $ref 由 $owner 和 $alias 同时声明。"
+            owners[$ref]=$alias
+        done <<< "${tags[$alias]}"
     done
-    
-    # 去重依赖列表
-    readarray -t dependents < <(printf '%s\n' "${dependents[@]}" | sort -u)
-    
-    if [ ${#dependents[@]} -eq 0 ]; then
-        echo -e "${YELLOW}没有找到依赖 $image_alias 的镜像${NC}"
-        exit 0
+
+    for alias in "${aliases[@]}"; do
+        refs=$(printf '%s' "${froms[$alias]-}" | LC_ALL=C sort -u) ||
+            fail "整理 $alias 的 FROM 列表失败。"
+        froms[$alias]=$refs
+        while IFS= read -r ref; do
+            [[ -n $ref && $ref != scratch ]] || continue
+            ref=$(canonical_ref "$ref")
+            owner=${owners[$ref]-}
+            [[ -n $owner ]] || continue
+            if [[ $'\n'${parents[$alias]-} != *$'\n'"$owner"$'\n'* ]]; then
+                parents[$alias]+="$owner"$'\n'
+                children[$owner]+="$alias"$'\n'
+            fi
+        done <<< "$refs"
+    done
+}
+
+list_images() {
+    local alias ref width=4
+    for alias in "${aliases[@]}"; do
+        (( ${#alias} <= width )) || width=${#alias}
+    done
+    printf '所有镜像信息：\n\n%-*s  %s\n' "$width" '别名' '镜像地址'
+    for alias in "${aliases[@]}"; do
+        while IFS= read -r ref; do
+            [[ -n $ref ]] || continue
+            printf '%-*s  %s\n' "$width" "$alias" "$ref"
+            alias=""
+        done <<< "${tags[$alias]}"
+    done
+}
+
+show_dependencies() {
+    local alias=$1
+    printf '镜像 %s 的依赖关系：\n\n依赖的镜像：\n%s\n\n编译后的标签列表：\n%s\n\n被以下镜像依赖：\n%s' \
+        "$alias" "${froms[$alias]}" "${tags[$alias]}" "${children[$alias]-}"
+}
+
+declare -A shown=() tree_path=()
+
+print_tree() {
+    local alias=$1 indent=$2 child
+    printf '%s%s' "$indent" "$alias"
+    if [[ ${tree_path[$alias]-} ]]; then
+        printf ' (循环依赖)\n'
+        return
     fi
-
-    echo -e "${GREEN}开始构建依赖 $image_alias 的镜像:${NC}\n"
-
-    # 构建每个依赖镜像
-    for dependent in "${dependents[@]}"; do
-        echo -e "${YELLOW}构建 $dependent ${NC}"
-        if [ -f "$DOCKERFILE_DIR/$dependent/build.sh" ]; then
-            (cd "$DOCKERFILE_DIR/$dependent" && bash build.sh)
-        else
-            echo -e "${RED}找不到构建脚本 $DOCKERFILE_DIR/$dependent/build.sh${NC}"
-        fi
-    done
+    printf '\n'
+    shown[$alias]=1
+    tree_path[$alias]=1
+    while IFS= read -r child; do
+        [[ -n $child ]] || continue
+        print_tree "$child" "$indent  "
+    done <<< "${children[$alias]-}"
+    tree_path[$alias]=""
 }
 
-# 解析Dockerfile中的FROM指令
-parse_from_image() {
-    local dockerfile=$1
-    local build_script=$2
-    local from_images=()
-    
-    # 读取FROM指令
-    while IFS= read -r line; do
-        if [[ $line =~ ^FROM[[:space:]]+(.+)$ ]]; then
-            local from_image="${BASH_REMATCH[1]}"
-            # 处理多阶段构建的命名
-            from_image="${from_image%% as *}"
-            from_image="${from_image%% AS *}"
-            
-            # 处理变量替换
-            if [[ $from_image =~ \$\{.+\} ]] && [ -f "$build_script" ]; then
-                # 获取build.sh中的所有变量
-                while IFS= read -r build_line; do
-                    if [[ $build_line =~ ^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)=(.+)$ ]]; then
-                        local var_name="${BASH_REMATCH[1]}"
-                        local var_value="${BASH_REMATCH[2]//\"/}"
-                        from_image=${from_image//\$\{$var_name\}/$var_value}
-                    fi
-                done < "$build_script"
-            fi
-            from_images+=("$from_image")
-        fi
-    done < "$dockerfile"
-    
-    printf "%s\n" "${from_images[@]}"
-}
-
-# 检查镜像依赖关系
-check_image_dependency() {
-    local from_image="$1"
-    shift
-    local target_images=("$@")
-    
-    # 标准化镜像名称（移除标签）
-    local from_base="${from_image%:*}"
-    from_base="${from_base#harbor.*/}"  # 移除仓库前缀
-    
-    for target in "${target_images[@]}"; do
-        local target_base="${target%:*}"
-        target_base="${target_base#harbor.*/}"  # 移除仓库前缀
-        
-        if [[ "$from_base" == "$target_base" ]]; then
-            return 0
-        fi
-    done
-    return 1
-}
-
-# 递归生成依赖树
-generate_dependency_tree() {
-    local image_alias=$1
-    local prefix=$2
-    local last=$3
-    local visited=($4)
-
-    # 检查是否已访问过该节点（防止循环依赖）
-    for v in "${visited[@]}"; do
-        if [[ "$v" == "$image_alias" ]]; then
-            if [ "$last" == "true" ]; then
-                echo -e "${prefix}└── ${YELLOW}$image_alias${NC} (循环依赖)"
-            else
-                echo -e "${prefix}├── ${YELLOW}$image_alias${NC} (循环依赖)"
-            fi
-            return
-        fi
-    done
-    
-    # 获取镜像地址
-    local dockerfile="$DOCKERFILE_DIR/$image_alias/Dockerfile"
-    if [ ! -f "$dockerfile" ]; then
-        if (("$last" == "true")); then
-            echo -e "${prefix}└── ${RED}$image_alias (未找到 Dockerfile)${NC}"
-        else
-            echo -e "${prefix}├── ${RED}$image_alias (未找到 Dockerfile)${NC}"
-        fi
+show_tree() {
+    local alias=$1
+    if [[ -n $alias ]]; then
+        print_tree "$alias" ''
         return
     fi
 
-    # 显示当前节点
-    if [ "$last" == "true" ]; then
-        echo -e "${prefix}└── ${GREEN}$image_alias${NC}"
-        prefix="${prefix}    "
-    else
-        echo -e "${prefix}├── ${GREEN}$image_alias${NC}"
-        prefix="${prefix}│   "
-    fi
-    
-    # 将当前节点添加到已访问列表
-    visited+=($image_alias)
-    
-    # 获取所有依赖此镜像的其他镜像
-    local dependents=()
-    for source_image in ${DOCKERFILE_IMAGE_CACHE[$image_alias]}; do
-       for key in "${!DOCKERFILE_FROM_CACHE[@]}"; do
-           for from_image in "${DOCKERFILE_FROM_CACHE[$key]}"; do
-               if check_image_dependency "$from_image" "$source_image"; then
-                   dependents+=("$key")
-                   break
-               fi
-           done
-       done
+    for alias in "${aliases[@]}"; do
+        [[ ${parents[$alias]-} ]] || print_tree "$alias" ''
     done
-    
-    # 去重依赖列表
-    dependents=($(printf "%s\n" "${dependents[@]}" | sort -u))
-    
-    local last_idx=$((${#dependents[@]} - 1))
-    local i=0
-    for dependent in "${dependents[@]}"; do
-        if [ $i -eq $last_idx ]; then
-            generate_dependency_tree "$dependent" "$prefix" "true" "${visited[*]}"
-        else
-            generate_dependency_tree "$dependent" "$prefix" "false" "${visited[*]}"
-        fi
-        ((i++))
+    for alias in "${aliases[@]}"; do
+        [[ ${shown[$alias]-} ]] || print_tree "$alias" ''
     done
 }
 
-# 获取所有基础镜像(没有被其他镜像依赖的镜像)
-get_base_images() {
-    local dependent_images=()
-    
-    # 获取所有依赖关系
-    for img in "${!DOCKERFILE_IMAGE_CACHE[@]}"; do
-        for source_image in ${DOCKERFILE_IMAGE_CACHE[$img]}; do
-           for key in "${!DOCKERFILE_FROM_CACHE[@]}"; do
-               for from_image in "${DOCKERFILE_FROM_CACHE[$key]}"; do
-                   if check_image_dependency "$from_image" "$source_image"; then
-                       dependent_images+=("$key")
-                       break
-                   fi
-               done
-           done
-        done
-    done
-    
-    # 找出没有被依赖的镜像
-    for img in "${!DOCKERFILE_IMAGE_CACHE[@]}"; do
-        local is_dependent=0
-        for dep in "${dependent_images[@]}"; do
-            if [ "$img" == "$dep" ]; then
-                is_dependent=1
-                break
-            fi
-        done
-        if [ $is_dependent -eq 0 ]; then
-            echo "$img"
-        fi
-    done | sort -u
-}
-
-# 显示依赖树
-show_dependency_tree() {
-    local image_alias=$1
-    
-    if [ -z "$image_alias" ]; then
-        echo -e "${GREEN}所有镜像依赖树:${NC}\n"
-        # 获取所有基础镜像
-        local base_images=($(get_base_images))
-        local last_idx=$((${#base_images[@]} - 1))
-        local i=0
-        
-        # 显示每个基础镜像的依赖树
-        for base_image in "${base_images[@]}"; do
-            if [ $i -eq $last_idx ]; then
-                generate_dependency_tree "$base_image" "" "true" ""
-            else
-                generate_dependency_tree "$base_image" "" "false" ""
-            fi
-            ((i++))
-            # 如果不是最后一个基础镜像，添加空行
-            if [ $i -ne ${#base_images[@]} ]; then
-                echo "│"
-            fi
-        done
-    else
-        echo -e "${GREEN}镜像 $image_alias 依赖树:${NC}\n"
-        generate_dependency_tree "$image_alias" "" "true" ""
-    fi
-}
-
-init_cache
-
-# 命令行参数处理
-case "$1" in
-    "list")
-        get_images
-        ;;
-    "deps")
-        get_dependencies "$2"
-        ;;
-    "build")
-        build_dependents "$2"
-        ;;
-    "tree")
-        show_dependency_tree "$2"
-        ;;
-    *)
-        echo -e "用法:\n"
-        echo -e "  $0 list                     # 列出所有镜像"
-        echo -e "  $0 deps <image-alias>       # 显示指定镜像的依赖关系"
-        echo -e "  $0 build <image-alias>      # 构建依赖指定镜像的所有镜像"
-        echo -e "  $0 tree [image-alias]       # 以树形结构显示镜像依赖关系(不指定则显示所有)"
-        exit 1
-        ;;
-esac
-
-exit 0
-[root@k8s-master-node1 scripts]# vim image_manager.sh_1
-[root@k8s-master-node1 scripts]# bash image_manager.sh_1 list
-所有镜像信息:
-
-别名                       镜像地址
------------------------------------------------------------------------------
-common/tools/node           harbor.lework.cn/common/tools/node:20
-                            harbor.lework.cn/common/tools/node:20.17
-                            harbor.lework.cn/common/tools/node:20.17.0
-                            harbor.lework.cn/common/tools/node:20.17.0-debian11
-                            harbor.lework.cn/common/tools/node:20.17-debian11
-                            harbor.lework.cn/common/tools/node:20-debian11
-
-common/tools/php            harbor.lework.cn/common/tools/php:7
-                            harbor.lework.cn/common/tools/php:7.2
-                            harbor.lework.cn/common/tools/php:7.2-debian11
-                            harbor.lework.cn/common/tools/php:7-debian11
-
-common/runtime/php          harbor.lework.cn/common/runtime/php:7
-                            harbor.lework.cn/common/runtime/php:7.2
-                            harbor.lework.cn/common/runtime/php:7.2-debian11
-                            harbor.lework.cn/common/runtime/php:7-debian11
-
-common/os/debian            harbor.lework.cn/common/os/debian:bullseye
-                            harbor.lework.cn/common/os/debian:bullseye-20240926-slim
-                            harbor.lework.cn/common/os/debian:bullseye-slim
-
-common/runtime/node         harbor.lework.cn/common/runtime/node:20
-                            harbor.lework.cn/common/runtime/node:20.17
-                            harbor.lework.cn/common/runtime/node:20.17.0
-                            harbor.lework.cn/common/runtime/node:20.17.0-debian11
-                            harbor.lework.cn/common/runtime/node:20.17-debian11
-                            harbor.lework.cn/common/runtime/node:20-debian11
-
-common/runtime/python       harbor.lework.cn/common/runtime/python:3
-                            harbor.lework.cn/common/runtime/python:3.11
-                            harbor.lework.cn/common/runtime/python:3.11.10
-                            harbor.lework.cn/common/runtime/python:3.11.10-debian11
-                            harbor.lework.cn/common/runtime/python:3.11-debian11
-                            harbor.lework.cn/common/runtime/python:3-debian11
-
-common/runtime/openjdk      harbor.lework.cn/common/runtime/openjdk:24-debian11
-
-common/tools/openjdk        harbor.lework.cn/common/tools/openjdk:24
-                            harbor.lework.cn/common/tools/openjdk:24-debian11
-                            harbor.lework.cn/common/tools/openjdk:24-ea+30
-                            harbor.lework.cn/common/tools/openjdk:24-ea+30-debian11
-
-common/runtime/nginx        harbor.lework.cn/common/runtime/nginx:debian11
-
-common/tools/dind           harbor.lework.cn/common/tools/dind:latest
-
-common/tools/python         harbor.lework.cn/common/tools/python:3
-                            harbor.lework.cn/common/tools/python:3.11
-                            harbor.lework.cn/common/tools/python:3.11.10
-                            harbor.lework.cn/common/tools/python:3.11.10-debian11
-                            harbor.lework.cn/common/tools/python:3.11-debian11
-                            harbor.lework.cn/common/tools/python:3-debian11
-
-common/tools/ansible        harbor.leops.local/common/tools/ansible:7
-                            harbor.leops.local/common/tools/ansible:7.6
-                            harbor.leops.local/common/tools/ansible:7.6.0
-
-common/runtime/go           harbor.lework.cn/common/runtime/golang:debian11
-
-common/tools/maven          harbor.lework.cn/common/tools/maven:3
-                            harbor.lework.cn/common/tools/maven:3.9
-                            harbor.lework.cn/common/tools/maven:3.9.9
-                            harbor.lework.cn/common/tools/maven:3.9.9-debian11
-                            harbor.lework.cn/common/tools/maven:3.9-debian11
-                            harbor.lework.cn/common/tools/maven:3-debian11
-
-common/tools/go             harbor.lework.cn/common/tools/golang:1.23
-                            harbor.lework.cn/common/tools/golang:1.23.3
-                            harbor.lework.cn/common/tools/golang:1.23.3-debian11
-                            harbor.lework.cn/common/tools/golang:1.23-debian11
-
-[root@k8s-master-node1 scripts]# bash image_manager.sh_1 tree
-所有镜像依赖树:
-
-image_manager.sh_1: line 282: visited[@]: unbound variable
-[root@k8s-master-node1 scripts]# vim image_manager.sh_1
-[root@k8s-master-node1 scripts]# vim image_manager.sh_1
-[root@k8s-master-node1 scripts]# vim image_manager.sh_1
-[root@k8s-master-node1 scripts]# vim image_manager.sh_1
-[root@k8s-master-node1 scripts]# bash image_manager.sh_1 tree
-所有镜像依赖树:
-
-├── app-build/go
-image_manager.sh_1: line 337: dependents[@]: unbound variable
-[root@k8s-master-node1 scripts]#  cat image_manager.sh
-image_manager.sh       image_manager.sh_1     image_manager.sh_2     image_manager.sh_3.sh  
-[root@k8s-master-node1 scripts]#  cat image_manager.sh
-#!/bin/bash
-
-# 颜色变量
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m'
-
-# 默认的 Dockerfile 目录
-DOCKERFILE_DIR=${DOCKERFILE_DIR:-../}
-
-# 全局变量
-declare -A DOCKERFILE_FROM_CACHE
-declare -A DOCKERFILE_IMAGE_CACHE
-
-# 初始化缓存
-init_cache() {
-    while IFS= read -r dockerfile; do
-        local dir=$(dirname "$dockerfile")
-        local image_alias=$(echo "$dir" | sed "s|^${DOCKERFILE_DIR}||")
-        local build_script="$dir/build.sh"
-
-        DOCKERFILE_FROM_CACHE[$image_alias]=$(parse_from_image "$dockerfile" "$build_script" | sort)
-        DOCKERFILE_IMAGE_CACHE[$image_alias]=$(get_image_paths "$build_script" | sort)
-    done < <(find "$DOCKERFILE_DIR" -name "Dockerfile" -type f | sort)
-}
-
-# 获取镜像地址列表
-get_image_paths() {
-    local build_script=$1
-    local images=()
-    
-    if [ -f "$build_script" ]; then
-        # 先尝试从脚本执行结果获取
-        local script_output
-        script_output=$(bash "$build_script" list-tags 2>/dev/null)
-        if [ $? -eq 0 ] && [ -n "$script_output" ]; then
-            while IFS= read -r line; do
-                [ -n "$line" ] && images+=("$line")
-            done <<< "$script_output"
-            printf "%s\n" "${images[@]}"
-            return
-        fi
-        
-        # 回退到解析脚本内容
-        if grep -q "^image_paths=" "$build_script"; then
-            # 提取数组声明部分
-            local array_content
-            array_content=$(awk '/^image_paths=\(/{p=1;next} /^\)/{p=0} p{print}' "$build_script" | \
-                          grep -E '".+"' | sed 's/^[[:space:]]*"//;s/"[[:space:]]*$//')
-            while IFS= read -r line; do
-                [ -n "$line" ] && images+=("$line")
-            done <<< "$array_content"
-        else
-            # 尝试读取单个镜像声明
-            while IFS= read -r line; do
-                if [[ $line =~ ^[[:space:]]*image(_path)?=\" ]]; then
-                    images+=($(echo "$line" | cut -d'=' -f2- | tr -d '"' | tr -d ' '))
-                fi
-            done < "$build_script"
-        fi
-    fi
-    printf "%s\n" "${images[@]}"
-}
-
-# 获取所有镜像信息
-get_images() {
-    echo -e "${GREEN}所有镜像信息:${NC}\n"
-    
-    # 计算最长别名长度
-    local max_alias_len=0
-    
-    for key in "${!DOCKERFILE_IMAGE_CACHE[@]}"; do
-        local alias_len=$(echo $key| wc -c)
-        if (( alias_len > max_alias_len )); then
-            max_alias_len=$alias_len
-        fi
-    done
-    
-    # 设置列宽 (最长别名长度 + 4个空格的边距)
-    local col_width=$((max_alias_len + 4))
-    local padding=""
-    printf -v padding "%-${col_width}s" " "
-    
-    echo -e "${YELLOW}别名$(printf "%-$((col_width-4))s" " ")镜像地址${NC}"
-    echo "$(printf '%0.s-' $(seq 1 $((col_width + 50))))"
-    
-    local last_alias=""
-    for key in "${!DOCKERFILE_IMAGE_CACHE[@]}"; do
-        read -a images <<< ${DOCKERFILE_IMAGE_CACHE[$key]}
-
-        # 显示镜像信息
-        for i in "${!images[@]}"; do
-            if [ "$key" != "$last_alias" ]; then
-                printf "%-${col_width}s %s\n" "$key" "${images[$i]}"
-                last_alias="$key"
-            else
-                printf "%s %s\n" "$padding" "${images[$i]}"
-            fi
-        done
-    done
-}
-
-# 获取镜像依赖关系
-get_dependencies() {
-    local image_alias=$1
-    
-    if [ -z "$image_alias" ]; then
-        echo -e "${RED}请指定镜像别名${NC}"
-        exit 1
-    fi
-    
-    # 查找对应的Dockerfile
-    dockerfile="$DOCKERFILE_DIR/$image_alias/Dockerfile"
-    if [ ! -f "$dockerfile" ]; then
-        echo -e "${RED}找不到 $dockerfile${NC}"
-        exit 1
-    fi
-    
-    echo -e "${GREEN}镜像 $image_alias 的依赖关系:${NC}\n"
-    
-    # 获取FROM依赖
-    echo -e "${YELLOW}依赖的镜像:${NC}"
-    echo "${DOCKERFILE_FROM_CACHE[$image_alias]}" | tr ' ' '\n'
-    echo
-    
-    # 显示当前镜像的标签
-    echo -e "${YELLOW}编译后的标签列表:${NC}"
-
-    for image in ${DOCKERFILE_IMAGE_CACHE[$image_alias]}; do
-        echo "  └─ $image"
-    done
-    echo
-    
-    # 查找被哪些镜像依赖
-    echo -e "${YELLOW}被以下镜像依赖:${NC}"
-    local dependents=()
-
-    for source_image in ${DOCKERFILE_IMAGE_CACHE[$image_alias]}; do
-        for key in "${!DOCKERFILE_FROM_CACHE[@]}"; do
-                for from_image in "${DOCKERFILE_FROM_CACHE[$key]}"; do
-                    if check_image_dependency "$from_image" "$source_image"; then
-                        dependents+=("$key")
-                    fi
-                done
-        done
-    done 
-    
-    # 输出去重后的依赖列表
-    printf "%s\n" "${dependents[@]}" | sort -u
-}
-
-# 构建依赖镜像
 build_dependents() {
-    local image_alias=$1
-    
-    if [ -z "$image_alias" ]; then
-        echo -e "${RED}请指定镜像别名${NC}"
-        exit 1
-    fi
-    
-    # 获取所有依赖此镜像的其他镜像
-    local dependents=()
-    for source_image in ${DOCKERFILE_IMAGE_CACHE[$image_alias]}; do
-      for key in "${!DOCKERFILE_FROM_CACHE[@]}"; do
-           for from_image in "${DOCKERFILE_FROM_CACHE[$key]}"; do
-               if check_image_dependency "$from_image" "$source_image"; then
-                   dependents+=("$key")
-                   break 2  # 找到一个匹配就跳出两层循环
-               fi
-           done
-       done
+    local source=$1 alias child parent status i
+    local -a affected=("$source") order=()
+    local -A pending=(["$source"]=1)
+    [[ -n ${tags[$source]} ]] ||
+        fail "$source 没有 build.sh。请在应用代码仓库构建该模板对应的镜像。"
+
+    for ((i = 0; i < ${#affected[@]}; i++)); do
+        alias=${affected[i]}
+        while IFS= read -r child; do
+            [[ -n $child && ! ${pending[$child]+set} ]] || continue
+            affected+=("$child")
+            pending[$child]=1
+        done <<< "${children[$alias]-}"
     done
-    
-    # 去重依赖列表
-    readarray -t dependents < <(printf '%s\n' "${dependents[@]}" | sort -u)
-    
-    if [ ${#dependents[@]} -eq 0 ]; then
-        echo -e "${YELLOW}没有找到依赖 $image_alias 的镜像${NC}"
-        exit 0
-    fi
 
-    echo -e "${GREEN}开始构建依赖 $image_alias 的镜像:${NC}\n"
-    
-    # 构建每个依赖镜像
-    for dependent in "${dependents[@]}"; do
-        echo -e "${YELLOW}构建 $dependent ${NC}"
-        if [ -f "$DOCKERFILE_DIR/$dependent/build.sh" ]; then
-            (cd "$DOCKERFILE_DIR/$dependent" && bash build.sh)
-        else
-            echo -e "${RED}找不到构建脚本 $DOCKERFILE_DIR/$dependent/build.sh${NC}"
-        fi
-    done
-}
-
-# 解析Dockerfile中的FROM指令
-parse_from_image() {
-    local dockerfile=$1
-    local build_script=$2
-    local from_images=()
-    
-    # 读取FROM指令
-    while IFS= read -r line; do
-        if [[ $line =~ ^FROM[[:space:]]+(.+)$ ]]; then
-            local from_image="${BASH_REMATCH[1]}"
-            # 处理多阶段构建的命名
-            from_image="${from_image%% as *}"
-            from_image="${from_image%% AS *}"
-            
-            # 处理变量替换
-            if [[ $from_image =~ \$\{.+\} ]] && [ -f "$build_script" ]; then
-                # 获取build.sh中的所有变量
-                while IFS= read -r build_line; do
-                    if [[ $build_line =~ ^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)=(.+)$ ]]; then
-                        local var_name="${BASH_REMATCH[1]}"
-                        local var_value="${BASH_REMATCH[2]//\"/}"
-                        from_image=${from_image//\$\{$var_name\}/$var_value}
-                    fi
-                done < "$build_script"
-            fi
-            from_images+=("$from_image")
-        fi
-    done < "$dockerfile"
-    
-    printf "%s\n" "${from_images[@]}"
-}
-
-# 检查镜像依赖关系
-check_image_dependency() {
-    local from_image="$1"
-    shift
-    local target_images=("$@")
-    
-    # 标准化镜像名称（移除标签）
-    local from_base="${from_image%:*}"
-    from_base="${from_base#harbor.*/}"  # 移除仓库前缀
-    
-    for target in "${target_images[@]}"; do
-        local target_base="${target%:*}"
-        target_base="${target_base#harbor.*/}"  # 移除仓库前缀
-        
-        if [[ "$from_base" == "$target_base" ]]; then
-            return 0
-        fi
-    done
-    return 1
-}
-
-# 递归生成依赖树
-generate_dependency_tree() {
-    local image_alias=$1
-    local prefix=$2
-    local last=$3
-    local visited=($4)
-
-    # 检查是否已访问过该节点（防止循环依赖）
-    for v in "${visited[@]}"; do
-        if [[ "$v" == "$image_alias" ]]; then
-            if [ "$last" == "true" ]; then
-                echo -e "${prefix}└── ${YELLOW}$image_alias${NC} (循环依赖)"
-            else
-                echo -e "${prefix}├── ${YELLOW}$image_alias${NC} (循环依赖)"
-            fi
-            return
-        fi
-    done
-    
-    # 获取镜像地址
-    local dockerfile="$DOCKERFILE_DIR/$image_alias/Dockerfile"
-    if [ ! -f "$dockerfile" ]; then
-        if (("$last" == "true")); then
-            echo -e "${prefix}└── ${RED}$image_alias (未找到 Dockerfile)${NC}"
-        else
-            echo -e "${prefix}├── ${RED}$image_alias (未找到 Dockerfile)${NC}"
-        fi
-        return
-    fi
-
-    # 显示当前节点
-    if [ "$last" == "true" ]; then
-        echo -e "${prefix}└── ${GREEN}$image_alias${NC}"
-        prefix="${prefix}    "
-    else
-        echo -e "${prefix}├── ${GREEN}$image_alias${NC}"
-        prefix="${prefix}│   "
-    fi
-    
-    # 将当前节点添加到已访问列表
-    visited+=($image_alias)
-    
-    # 获取所有依赖此镜像的其他镜像
-    local dependents=()
-    for source_image in ${DOCKERFILE_IMAGE_CACHE[$image_alias]}; do
-       for key in "${!DOCKERFILE_FROM_CACHE[@]}"; do
-           for from_image in "${DOCKERFILE_FROM_CACHE[$key]}"; do
-               if check_image_dependency "$from_image" "$source_image"; then
-                   dependents+=("$key")
-                   break
-               fi
-           done
-       done
-    done
-    
-    # 去重依赖列表
-    dependents=($(printf "%s\n" "${dependents[@]}" | sort -u))
-    
-    local last_idx=$((${#dependents[@]} - 1))
-    local i=0
-    for dependent in "${dependents[@]}"; do
-        if [ $i -eq $last_idx ]; then
-            generate_dependency_tree "$dependent" "$prefix" "true" "${visited[*]}"
-        else
-            generate_dependency_tree "$dependent" "$prefix" "false" "${visited[*]}"
-        fi
-        ((i++))
-    done
-}
-
-# 获取所有基础镜像(没有被其他镜像依赖的镜像)
-get_base_images() {
-    local dependent_images=()
-    
-    # 获取所有依赖关系
-    for img in "${!DOCKERFILE_IMAGE_CACHE[@]}"; do
-        for source_image in ${DOCKERFILE_IMAGE_CACHE[$img]}; do
-           for key in "${!DOCKERFILE_FROM_CACHE[@]}"; do
-               for from_image in "${DOCKERFILE_FROM_CACHE[$key]}"; do
-                   if check_image_dependency "$from_image" "$source_image"; then
-                       dependent_images+=("$key")
-                       break
-                   fi
-               done
-           done
+    # 先排完顺序和检查循环，再执行会推送镜像的脚本。
+    local remaining=${#affected[@]} before
+    while (( remaining )); do
+        before=$remaining
+        for alias in "${affected[@]}"; do
+            [[ ${pending[$alias]} ]] || continue
+            while IFS= read -r parent; do
+                if [[ -n $parent && ${pending[$parent]-} ]]; then
+                    continue 2
+                fi
+            done <<< "${parents[$alias]-}"
+            pending[$alias]=""
+            order+=("$alias")
+            remaining=$((remaining - 1))
         done
+        (( remaining < before )) || fail "$source 的依赖图存在循环，无法安排构建。"
     done
-    
-    # 找出没有被依赖的镜像
-    for img in "${!DOCKERFILE_IMAGE_CACHE[@]}"; do
-        local is_dependent=0
-        for dep in "${dependent_images[@]}"; do
-            if [ "$img" == "$dep" ]; then
-                is_dependent=1
-                break
-            fi
-        done
-        if [ $is_dependent -eq 0 ]; then
-            echo "$img"
-        fi
-    done | sort -u
-}
 
-# 显示依赖树
-show_dependency_tree() {
-    local image_alias=$1
-    
-    if [ -z "$image_alias" ]; then
-        echo -e "${GREEN}所有镜像依赖树:${NC}\n"
-        # 获取所有基础镜像
-        local base_images=($(get_base_images))
-        local last_idx=$((${#base_images[@]} - 1))
-        local i=0
-        
-        # 显示每个基础镜像的依赖树
-        for base_image in "${base_images[@]}"; do
-            if [ $i -eq $last_idx ]; then
-                generate_dependency_tree "$base_image" "" "true" ""
-            else
-                generate_dependency_tree "$base_image" "" "false" ""
-            fi
-            ((i++))
-            # 如果不是最后一个基础镜像，添加空行
-            if [ $i -ne ${#base_images[@]} ]; then
-                echo "│"
-            fi
-        done
-    else
-        echo -e "${GREEN}镜像 $image_alias 依赖树:${NC}\n"
-        generate_dependency_tree "$image_alias" "" "true" ""
+    if (( ${#order[@]} == 1 )); then
+        printf '没有找到依赖 %s 的镜像。\n' "$source"
     fi
+    for alias in "${order[@]}"; do
+        [[ $alias != "$source" ]] || continue
+        if [[ -z ${tags[$alias]} ]]; then
+            printf '跳过应用模板 %s。请在应用代码仓库构建。\n' "$alias"
+            continue
+        fi
+        printf '构建 %s\n' "$alias"
+        (cd -- "$root/$alias" && bash ./build.sh) || {
+            status=$?
+            printf '构建 %s 失败，退出码 %s。\n' "$alias" "$status" >&2
+            return "$status"
+        }
+    done
 }
 
-init_cache
+usage() {
+    printf '用法：%s list | deps <镜像别名> | tree [镜像别名] | build <镜像别名>\n' "$0" >&2
+    exit 1
+}
 
-# 命令行参数处理
-case "$1" in
-    "list")
-        get_images
-        ;;
-    "deps")
-        get_dependencies "$2"
-        ;;
-    "build")
-        build_dependents "$2"
-        ;;
-    "tree")
-        show_dependency_tree "$2"
-        ;;
-    *)
-        echo -e "用法:\n"
-        echo -e "  $0 list                     # 列出所有镜像"
-        echo -e "  $0 deps <image-alias>       # 显示指定镜像的依赖关系"
-        echo -e "  $0 build <image-alias>      # 构建依赖指定镜像的所有镜像"
-        echo -e "  $0 tree [image-alias]       # 以树形结构显示镜像依赖关系(不指定则显示所有)"
-        exit 1
-        ;;
+command=${1-}
+alias=${2-}
+case "$command" in
+    list) (( $# == 1 )) || usage ;;
+    tree) (( $# <= 2 )) || usage ;;
+    deps|build) (( $# == 2 )) && [[ -n $alias ]] || usage ;;
+    *) usage ;;
 esac
 
-exit 0
+root=$(cd -- "${DOCKERFILE_DIR:-$(dirname -- "${BASH_SOURCE[0]}")}" && pwd -P) ||
+    fail "无法访问 Dockerfile 目录。请核对 DOCKERFILE_DIR。"
+load_images
+if [[ -n $alias && ! ${tags[$alias]+set} ]]; then
+    fail "找不到镜像别名 $alias。"
+fi
+
+case "$command" in
+    list) list_images ;;
+    deps) show_dependencies "$alias" ;;
+    tree) show_tree "$alias" ;;
+    build) build_dependents "$alias" ;;
+esac
